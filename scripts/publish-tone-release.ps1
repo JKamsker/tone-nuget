@@ -172,10 +172,33 @@ function Prepare-PackageReadme {
         throw "Expected upstream README at '$readmePath'."
     }
 
-    $readmeContent = [System.IO.File]::ReadAllText($readmePath)
-    if ([string]::IsNullOrWhiteSpace($readmeContent)) {
+    $upstreamReadmeContent = [System.IO.File]::ReadAllText($readmePath)
+    if ([string]::IsNullOrWhiteSpace($upstreamReadmeContent)) {
         throw "Upstream README is empty."
     }
+
+    $readmeContent = $upstreamReadmeContent -replace "`r`n", "`n"
+    $readmeContent = [System.Text.RegularExpressions.Regex]::Replace(
+        $readmeContent,
+        '(?ms)^<p align="center">\s*<a href="https://github\.com/sponsors/sandreas"><img[^>]*></a>\s*</p>\s*',
+        "[Support sandreas on GitHub Sponsors](https://github.com/sponsors/sandreas)`n`n"
+    )
+    $readmeContent = [System.Text.RegularExpressions.Regex]::Replace(
+        $readmeContent,
+        '(?m)^<details>\s*$',
+        ""
+    )
+    $readmeContent = [System.Text.RegularExpressions.Regex]::Replace(
+        $readmeContent,
+        '(?m)^\s*<summary>([^<]+)</summary>\s*$',
+        '#### $1'
+    )
+    $readmeContent = [System.Text.RegularExpressions.Regex]::Replace(
+        $readmeContent,
+        '(?m)^</details>\s*$',
+        ""
+    )
+    $readmeContent = $readmeContent -replace '<br\s*/?>', '; '
 
     $utf8WithBom = [System.Text.UTF8Encoding]::new($true)
     [System.IO.File]::WriteAllText($readmePath, $readmeContent, $utf8WithBom)
