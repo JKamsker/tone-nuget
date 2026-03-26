@@ -177,8 +177,8 @@ function Prepare-PackageReadme {
         throw "Upstream README is empty."
     }
 
-    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-    [System.IO.File]::WriteAllText($readmePath, $readmeContent, $utf8NoBom)
+    $utf8WithBom = [System.Text.UTF8Encoding]::new($true)
+    [System.IO.File]::WriteAllText($readmePath, $readmeContent, $utf8WithBom)
 
     return $readmeContent
 }
