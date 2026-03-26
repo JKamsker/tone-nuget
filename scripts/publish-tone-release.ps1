@@ -16,6 +16,7 @@ $upstreamRepoUrl = "https://github.com/$upstreamRepo"
 $upstreamGitUrl = "$upstreamRepoUrl.git"
 $packageId = "tone"
 $packageDescription = "Cross-platform audio tagger and metadata editor for mp3, m4b, flac, and more."
+$packageReadmeFile = "README.md"
 $nugetSource = "https://api.nuget.org/v3/index.json"
 $programVersionPlaceholder = "@package_version@"
 
@@ -149,18 +150,99 @@ function Write-DirectoryBuildProps {
     <RepositoryUrl>$upstreamRepoUrl</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReadmeFile>$packageReadmeFile</PackageReadmeFile>
     <IsPackable>true</IsPackable>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>tone</ToolCommandName>
   </PropertyGroup>
   <ItemGroup Condition="'`$(MSBuildProjectName)' == 'tone'">
-    <None Include="`$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="/" Condition="Exists('`$(MSBuildThisFileDirectory)README.md')" />
+    <None Include="`$(MSBuildThisFileDirectory)$packageReadmeFile" Pack="true" PackagePath="/" Condition="Exists('`$(MSBuildThisFileDirectory)$packageReadmeFile')" />
   </ItemGroup>
 </Project>
 "@
 
     Set-Content -LiteralPath $propsPath -Value $props
+}
+
+function Prepare-PackageReadme {
+    param([string]$SourceRoot)
+
+    $readmePath = Join-Path $SourceRoot $packageReadmeFile
+    if (-not (Test-Path -LiteralPath $readmePath)) {
+        throw "Expected upstream README at '$readmePath'."
+    }
+
+    $readmeContent = [System.IO.File]::ReadAllText($readmePath)
+    if ([string]::IsNullOrWhiteSpace($readmeContent)) {
+        throw "Upstream README is empty."
+    }
+
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($readmePath, $readmeContent, $utf8NoBom)
+
+    return $readmeContent
+}
+
+function Assert-PackageContainsReadme {
+    param(
+        [string]$PackagePath,
+        [string]$ExpectedReadmeContent
+    )
+
+    $utf8Strict = [System.Text.UTF8Encoding]::new($false, $true)
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($PackagePath)
+
+    try {
+        $readmeEntry = $archive.Entries | Where-Object { $_.FullName -eq $packageReadmeFile } | Select-Object -First 1
+        if (-not $readmeEntry) {
+            throw "Package '$PackagePath' does not contain '$packageReadmeFile'."
+        }
+
+        $stream = $readmeEntry.Open()
+        try {
+            $reader = [System.IO.StreamReader]::new($stream, $utf8Strict, $true)
+            try {
+                $packagedReadmeContent = $reader.ReadToEnd()
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            $stream.Dispose()
+        }
+
+        if ($packagedReadmeContent -ne $ExpectedReadmeContent) {
+            throw "Packaged README content does not match the upstream README content."
+        }
+
+        $nuspecEntry = $archive.Entries | Where-Object { $_.FullName -like "*.nuspec" } | Select-Object -First 1
+        if (-not $nuspecEntry) {
+            throw "Package '$PackagePath' does not contain a nuspec entry."
+        }
+
+        $nuspecStream = $nuspecEntry.Open()
+        try {
+            $nuspecReader = [System.IO.StreamReader]::new($nuspecStream, $utf8Strict, $true)
+            try {
+                $nuspecContent = $nuspecReader.ReadToEnd()
+            }
+            finally {
+                $nuspecReader.Dispose()
+            }
+        }
+        finally {
+            $nuspecStream.Dispose()
+        }
+
+        $escapedReadmeFile = [System.Text.RegularExpressions.Regex]::Escape($packageReadmeFile)
+        if ($nuspecContent -notmatch "<readme>$escapedReadmeFile</readme>") {
+            throw "Package nuspec does not reference '$packageReadmeFile' as the package readme."
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
 }
 
 function Update-ProgramVersion {
@@ -251,6 +333,7 @@ try {
     Write-Step "Injecting NuGet tool packaging metadata"
     Write-DirectoryBuildProps -SourceRoot $sourceRoot -PackageVersion $packageVersion
     Update-ProgramVersion -SourceRoot $sourceRoot -PackageVersion $packageVersion
+    $expectedReadmeContent = Prepare-PackageReadme -SourceRoot $sourceRoot
 
     Write-Step "Running upstream tests"
     Invoke-ExternalCommand -FilePath "dotnet" -Arguments @(
@@ -276,6 +359,9 @@ try {
     if (-not (Test-Path -LiteralPath $packagePath)) {
         throw "Expected package '$packagePath' was not created."
     }
+
+    Write-Step "Validating packaged upstream README"
+    Assert-PackageContainsReadme -PackagePath $packagePath -ExpectedReadmeContent $expectedReadmeContent
 
     if ($SkipPush.IsPresent) {
         Write-Step "SkipPush enabled. Leaving package at $packagePath"
