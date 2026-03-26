@@ -1,0 +1,108 @@
+name: publish-tone
+
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional upstream release tag, for example v0.2.5
+        required: false
+        type: string
+      force:
+        description: Publish even if the cursor already matches
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tone-nuget-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Detect upstream release
+        id: detect
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}
+          FORCE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.force && 'true' || 'false' }}
+        run: |
+          $force = $env:FORCE_PUBLISH -eq "true"
+          ./scripts/publish-tone-release.ps1 `
+            -CursorPath ./state/published-release.json `
+            -ReleaseTag $env:RELEASE_TAG `
+            -Force:$force `
+            -DetectOnly
+
+      - name: No new release
+        if: steps.detect.outputs.should_publish != 'true'
+        run: echo "No unpublished upstream release detected."
+
+      - name: Check Bitwarden access token
+        if: steps.detect.outputs.should_publish == 'true'
+        id: bitwarden
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.BW_ACCESS_TOKEN }}" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "BW_ACCESS_TOKEN is not configured; skipping publish."
+            exit 0
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Setup dotnet
+        if: steps.detect.outputs.should_publish == 'true' && steps.bitwarden.outputs.available == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Load NuGet API key from Bitwarden
+        if: steps.detect.outputs.should_publish == 'true' && steps.bitwarden.outputs.available == 'true'
+        uses: bitwarden/sm-action@v2
+        with:
+          access_token: ${{ secrets.BW_ACCESS_TOKEN }}
+          base_url: https://vault.bitwarden.eu
+          secrets: |
+            265b2fb6-2cf0-4859-9bc8-b24c00ab4378 > NUGET_API_KEY
+
+      - name: Publish package
+        id: publish
+        if: steps.detect.outputs.should_publish == 'true' && steps.bitwarden.outputs.available == 'true'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.detect.outputs.upstream_tag }}
+          FORCE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.force && 'true' || 'false' }}
+        run: |
+          $force = $env:FORCE_PUBLISH -eq "true"
+          ./scripts/publish-tone-release.ps1 `
+            -CursorPath ./state/published-release.json `
+            -ReleaseTag $env:RELEASE_TAG `
+            -Force:$force
+
+      - name: Commit cursor
+        if: steps.publish.outputs.cursor_updated == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/published-release.json
+          if git diff --cached --quiet; then
+            echo "No cursor change to commit."
+            exit 0
+          fi
+          git commit -m "Update cursor for ${{ steps.publish.outputs.upstream_tag }}"
+          git push origin HEAD:main
